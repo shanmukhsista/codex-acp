@@ -84,4 +84,20 @@ describe("PromptTokenUsage", () => {
 
         expect(usage.usage()?.totalTokens).toBe(1500);
     });
+
+    it("tells whether an update was counted as a request", () => {
+        const usage = new PromptTokenUsage(count(1000));
+
+        expect(usage.observe(count(1000), count(1000))).toBe(false);
+        expect(usage.observe(count(1500), count(500))).toBe(true);
+        expect(usage.observe(count(1500), count(500))).toBe(false);
+    });
+
+    it("does not count the first update after a resume, which carries the old history", () => {
+        const usage = new PromptTokenUsage(null);
+
+        expect(usage.observe(count(9000), count(500))).toBe(false);
+        usage.observeModelOutput();
+        expect(usage.observe(count(9500), count(500))).toBe(true);
+    });
 });

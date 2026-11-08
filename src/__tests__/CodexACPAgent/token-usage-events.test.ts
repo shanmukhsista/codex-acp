@@ -5,6 +5,7 @@ import { PromptTokenUsage, toPromptUsage, type TokenCount } from '../../TokenCou
 import type { TokenUsageBreakdown } from '../../app-server/v2';
 import type { SessionState } from '../../CodexAcpServer';
 import { ACPSessionConnection } from '../../ACPSessionConnection';
+import type { Model } from '../../app-server/v2';
 import { CodexSubagentEventRouter } from '../../subagents/CodexSubagentEventRouter';
 
 function createTokenUsageNotification(
@@ -736,22 +737,157 @@ describe('Token Usage Events', () => {
             expect(response.usage?.totalTokens).toBe(1000);
         });
 
-        it('ignores the usage of a thread that is not the session or its subagent', async () => {
-            const sessionState = createTestSessionState({ sessionId });
-            const handler = createTestEventHandler(mockFixture.getAcpConnection(), sessionState);
+    });
+
+    describe('usage records', () => {
+        const usageMeta = (events: any[]) => events
+            .filter(event => event.method === 'sessionUpdate' && event.args[0].update.sessionUpdate === 'session_info_update'
+                && event.args[0].update._meta?.['workbench/usage'])
+            .map(event => ({ sessionId: event.args[0].sessionId, ...event.args[0].update._meta['workbench/usage'] }));
+        const usageUpdates = (events: any[]) => events
+            .filter(event => event.method === 'sessionUpdate' && event.args[0].update.sessionUpdate === 'usage_update');
+        const fastModel = { id: 'child-model', additionalSpeedTiers: ['fast'] } as unknown as Model;
+        const request = (total: number, last: number) => createTokenUsageNotification(sessionId, {
+            total: { totalTokens: total, inputTokens: total, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+            last: { totalTokens: last, inputTokens: last, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+            modelContextWindow: 128000,
+        });
+
+        function newHandler(overrides: Partial<SessionState> = {}) {
+            const sessionState = createTestSessionState({ sessionId, authProvider: 'azure', ...overrides });
             sessionState.promptTokenUsage = new PromptTokenUsage(null);
             sessionState.promptTokenUsage.observeModelOutput();
+            return { sessionState, handler: createTestEventHandler(mockFixture.getAcpConnection(), sessionState) };
+        }
 
-            await handler.handleNotification(parentUsage);
-            await handler.handleNotification(childUsage);
+        it('sends one request record per counted update, with model, provider and tier', async () => {
+            const { handler } = newHandler({ fastModeEnabled: true, currentModelSupportsFast: true });
 
-            const usageUpdates = mockFixture.getAcpConnectionEvents([])
-                .filter(event => event.method === 'sessionUpdate' && event.args[0].update.sessionUpdate === 'usage_update')
-                .map(event => ({ sessionId: event.args[0].sessionId, used: event.args[0].update.used, size: event.args[0].update.size }));
-            expect(usageUpdates).toEqual([{ sessionId, used: 1000, size: 128000 }]);
-            expect(sessionState.lastTokenUsage?.totalTokens).toBe(1000);
-            expect(sessionState.modelContextWindow).toBe(128000);
-            expect(sessionState.promptTokenUsage.usage()?.totalTokens).toBe(1000);
+            await handler.handleNotification(createTokenUsageNotification(sessionId, {
+                total: { totalTokens: 5000, inputTokens: 4000, cachedInputTokens: 1000, cacheWriteInputTokens: 200, outputTokens: 900, reasoningOutputTokens: 100 },
+                last: { totalTokens: 2500, inputTokens: 2000, cachedInputTokens: 500, cacheWriteInputTokens: 100, outputTokens: 450, reasoningOutputTokens: 50 },
+                modelContextWindow: 128000,
+            }));
+
+            expect(usageMeta(mockFixture.getAcpConnectionEvents([]))).toEqual([{
+                sessionId, scope: 'request', provider: 'azure', model: 'model-id',
+                input: 1400, cacheRead: 500, cacheWrite: 100, output: 450, reasoning: 50, serviceTier: 'fast',
+            }]);
+        });
+
+        it('sends no record for a repeated update, the first update after a resume or an all-zero update', async () => {
+            const { sessionState, handler } = newHandler();
+            sessionState.promptTokenUsage = new PromptTokenUsage(null);
+
+            await handler.handleNotification(request(9000, 500));
+            sessionState.promptTokenUsage.observeModelOutput();
+            await handler.handleNotification(request(9500, 500));
+            await handler.handleNotification(request(9500, 500));
+            await handler.handleNotification(createTokenUsageNotification(sessionId, {
+                total: { totalTokens: 128000, inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+                last: { totalTokens: 128000, inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+                modelContextWindow: 128000,
+            }));
+
+            expect(usageMeta(mockFixture.getAcpConnectionEvents([])).map(record => record.input)).toEqual([500]);
+        });
+
+        it('adds up to the usage of the prompt answer', async () => {
+            const codexAcpAgent = mockFixture.getCodexAcpAgent();
+            mockFixture.getCodexAppServerClient().turnStart = vi.fn().mockResolvedValue({
+                turn: { id: 'turn-id', items: [], status: 'inProgress', error: null },
+            });
+            mockFixture.getCodexAppServerClient().awaitTurnCompleted = vi.fn().mockImplementation(async () => {
+                for (const notification of [reasoningStarted(sessionId), request(1000, 1000), request(1000, 1000), request(2200, 1200), request(3500, 1300)]) {
+                    mockFixture.sendServerNotification(notification);
+                }
+                return { threadId: sessionId, turn: { id: 'turn-id', items: [], status: 'completed', error: null } };
+            });
+            vi.spyOn(codexAcpAgent, 'getSessionState').mockReturnValue(createTestSessionState({ sessionId }));
+
+            const response = await codexAcpAgent.prompt({ sessionId, prompt: [{ type: 'text', text: 'test prompt' }] });
+
+            const records = usageMeta(mockFixture.getAcpConnectionEvents([]));
+            expect(records).toHaveLength(3);
+            expect(records.reduce((sum, record) => sum + record.input, 0)).toBe(response.usage?.inputTokens);
+        });
+
+        describe('hidden subagents', () => {
+            const childThreadId = 'hidden-child';
+            const childStarted = (model: string): ServerNotification => ({
+                method: 'thread/started',
+                params: { thread: { id: childThreadId, model } as any },
+            });
+            const childUsage = (total: number, last: number) => createTokenUsageNotification(childThreadId, {
+                total: { totalTokens: total, inputTokens: total, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+                last: { totalTokens: last, inputTokens: last, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+                modelContextWindow: 200000,
+            }, 'child-turn-id');
+
+            it('sends one subagent record on the root session and leaves the root usage alone', async () => {
+                const { sessionState, handler } = newHandler({ fastModeEnabled: true, availableModels: [fastModel] });
+
+                await handler.handleNotification(childStarted('child-model'));
+                await handler.handleNotification(childUsage(7000, 7000));
+                await handler.handleNotification(childUsage(7000, 7000));
+                await handler.handleNotification(childUsage(9000, 2000));
+
+                const events = mockFixture.getAcpConnectionEvents([]);
+                expect(usageMeta(events)).toEqual([
+                    expect.objectContaining({ sessionId, scope: 'subagent', model: 'child-model', input: 7000, serviceTier: 'fast' }),
+                    expect.objectContaining({ sessionId, scope: 'subagent', model: 'child-model', input: 2000, serviceTier: 'fast' }),
+                ]);
+                expect(usageUpdates(events)).toEqual([]);
+                expect(sessionState.lastTokenUsage).toBeNull();
+                expect(sessionState.totalTokenUsage).toBeNull();
+                expect(sessionState.promptTokenUsage?.usage()).toBeNull();
+                expect(sessionState.modelContextWindow).toBeNull();
+            });
+
+            it('uses the root model, and no tier, for a child whose model was not seen', async () => {
+                const { handler } = newHandler({ fastModeEnabled: true });
+
+                await handler.handleNotification(childUsage(100, 100));
+
+                const [record] = usageMeta(mockFixture.getAcpConnectionEvents([]));
+                expect(record).toMatchObject({ scope: 'subagent', model: 'model-id' });
+                expect(record).not.toHaveProperty('serviceTier');
+            });
+
+            it('sends the record of an update that arrives after the turn ended', async () => {
+                const { handler } = newHandler();
+
+                await handler.handleSessionScopedNotification(childUsage(100, 100));
+
+                expect(usageMeta(mockFixture.getAcpConnectionEvents([]))).toHaveLength(1);
+            });
+
+            it('reaches the root handler from a child discovered during a prompt', async () => {
+                const codexAcpAgent = mockFixture.getCodexAcpAgent();
+                mockFixture.getCodexAppServerClient().turnStart = vi.fn().mockResolvedValue({
+                    turn: { id: 'turn-id', items: [], status: 'inProgress', error: null },
+                });
+                const spawned: ServerNotification = {
+                    method: 'item/started',
+                    params: {
+                        threadId: sessionId, turnId: 'turn-id', startedAtMs: 0,
+                        item: { type: 'subAgentActivity', model: null, reasoningEffort: null, id: 'activity', kind: 'started', agentThreadId: childThreadId, agentPath: '/root/worker' },
+                    },
+                };
+                mockFixture.getCodexAppServerClient().awaitTurnCompleted = vi.fn().mockImplementation(async () => {
+                    for (const notification of [spawned, childUsage(300, 300)]) {
+                        mockFixture.sendServerNotification(notification);
+                    }
+                    return { threadId: sessionId, turn: { id: 'turn-id', items: [], status: 'completed', error: null } };
+                });
+                vi.spyOn(codexAcpAgent, 'getSessionState').mockReturnValue(createTestSessionState({ sessionId }));
+
+                await codexAcpAgent.prompt({ sessionId, prompt: [{ type: 'text', text: 'test prompt' }] });
+
+                expect(usageMeta(mockFixture.getAcpConnectionEvents([]))).toEqual([
+                    expect.objectContaining({ sessionId, scope: 'subagent', input: 300 }),
+                ]);
+            });
         });
     });
 });

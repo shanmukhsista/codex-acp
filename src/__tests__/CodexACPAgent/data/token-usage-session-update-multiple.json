@@ -18,9 +18,55 @@
       {
         "sessionId": "test-session-id",
         "update": {
+          "sessionUpdate": "session_info_update",
+          "_meta": {
+            "workbench/usage": {
+              "scope": "request",
+              "provider": "openai",
+              "model": "model-id",
+              "input": 800,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "output": 200,
+              "reasoning": 0
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "method": "sessionUpdate",
+    "args": [
+      {
+        "sessionId": "test-session-id",
+        "update": {
           "sessionUpdate": "usage_update",
           "used": 1000,
           "size": 128000
+        }
+      }
+    ]
+  },
+  {
+    "method": "sessionUpdate",
+    "args": [
+      {
+        "sessionId": "test-session-id",
+        "update": {
+          "sessionUpdate": "session_info_update",
+          "_meta": {
+            "workbench/usage": {
+              "scope": "request",
+              "provider": "openai",
+              "model": "model-id",
+              "input": 700,
+              "cacheRead": 500,
+              "cacheWrite": 0,
+              "output": 200,
+              "reasoning": 100
+            }
+          }
         }
       }
     ]
