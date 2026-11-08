@@ -84,7 +84,7 @@ function combine(a: TokenCount, b: TokenCount, op: (x: number, y: number) => num
     return result;
 }
 
-function sameCount(a: TokenCount, b: TokenCount): boolean {
+export function sameCount(a: TokenCount, b: TokenCount): boolean {
     return TOKEN_COUNT_FIELDS.every(field => a[field] === b[field]);
 }
 
@@ -122,13 +122,14 @@ export class PromptTokenUsage {
         this.modelOutputSeen = true;
     }
 
-    observe(total: TokenCount, last: TokenCount): void {
+    /** Returns true when `last` was counted as a request of this prompt, false when the update was skipped. */
+    observe(total: TokenCount, last: TokenCount): boolean {
         const previous = this.previousTotal;
-        if (previous !== null && sameCount(total, previous)) return;
+        if (previous !== null && sameCount(total, previous)) return false;
         if (previous === null && !this.modelOutputSeen) {
             this.startTotal = total;
             this.previousTotal = total;
-            return;
+            return false;
         }
         if (previous !== null && TOKEN_COUNT_FIELDS.some(field => total[field] < previous[field])) {
             this.totalWentBack = true;
@@ -136,6 +137,7 @@ export class PromptTokenUsage {
         this.summedLast = this.summedLast === null ? {...last} : combine(this.summedLast, last, (x, y) => x + y);
         this.previousTotal = total;
         this.latestTotal = total;
+        return true;
     }
 
     /** The usage of the prompt so far, or null when Codex reported none. */

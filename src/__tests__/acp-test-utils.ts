@@ -427,6 +427,7 @@ export function createTestSessionState(overrides?: Partial<SessionState>): Sessi
         lastTokenUsage: null,
         totalTokenUsage: null,
         promptTokenUsage: null,
+        childUsage: new Map(),
         threadHasHistory: true,
         modelContextWindow: null,
         rateLimits: null,

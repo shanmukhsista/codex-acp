@@ -256,6 +256,8 @@ export interface SessionState extends SessionIndexTitleState {
     totalTokenUsage: TokenCount | null;
     /** The token usage of the current or last prompt, which its PromptResponse reports. */
     promptTokenUsage: PromptTokenUsage | null;
+    /** What the adapter knows of each hidden subagent thread: the model it runs and its last reported total. */
+    childUsage: Map<string, {model?: string; total?: TokenCount}>;
     /** Whether the thread may have token usage from before this session, as a loaded, resumed or forked thread. */
     threadHasHistory: boolean;
     modelContextWindow: number | null;
@@ -1195,6 +1197,7 @@ export class CodexAcpServer {
             lastTokenUsage: null,
             totalTokenUsage: null,
             promptTokenUsage: null,
+            childUsage: new Map(),
             threadHasHistory: operation !== "new",
             ...(sessionMetadata.instructions ? {instructions: sessionMetadata.instructions} : {}),
             modelContextWindow: null,
@@ -3267,6 +3270,7 @@ export class CodexAcpServer {
             lastTokenUsage: null,
             totalTokenUsage: null,
             promptTokenUsage: null,
+            childUsage: new Map(),
             threadHasHistory: true,
             ...(sessionMetadata.instructions ? {instructions: sessionMetadata.instructions} : {}),
             modelContextWindow: null,

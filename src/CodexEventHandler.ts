@@ -33,7 +33,8 @@ import type {
     TurnPlanUpdatedNotification,
     WarningNotification
 } from "./app-server/v2";
-import {toTokenCount} from "./TokenCount";
+import {sameCount, toTokenCount, type TokenCount} from "./TokenCount";
+import {modelSupportsFast, resolveFastServiceTier} from "./FastModeConfig";
 import { stripShellPrefix } from "./CommandUtils";
 import {AcpToolCallRenderer} from "./tool-calls/AcpToolCallRenderer";
 import {commandUsesTerminal} from "./tool-calls/reporters/CommandReporter";
@@ -617,7 +618,7 @@ export class CodexEventHandler {
                 this.sessionState.openToolCalls.clear();
                 return null;
             case "thread/tokenUsage/updated":
-                return this.createUsageUpdate(notification.params);
+                return await this.createUsageUpdate(notification.params);
             case "thread/name/updated":
                 if (isStaleAutomaticTitleEcho(this.sessionState, normalizeSessionTitle(notification.params.threadName))) {
                     this.sessionState.titleGen?.observeRename();
@@ -716,6 +717,14 @@ export class CodexEventHandler {
             case "skills/changed":
                 // The server lists the skills again and publishes the commands. The change itself is no update.
                 return null;
+            case "thread/started": {
+                // The app-server sends this to every handler, so the model of a hidden subagent is known here.
+                const {id, model} = notification.params.thread;
+                if (id !== this.sessionState.sessionId && model) {
+                    this.sessionState.childUsage.set(id, {...this.sessionState.childUsage.get(id), model});
+                }
+                return null;
+            }
             // ignored events
             // Read markers and predictions have no ACP session update counterpart.
             case "thread/readState/changed":
@@ -759,7 +768,6 @@ export class CodexEventHandler {
             case "externalAgentConfig/import/completed":
             case "rawResponseItem/completed":
             case "rawResponse/completed":
-            case "thread/started":
             case "remoteControl/status/changed":
             case "app/list/updated":
             case "thread/settings/updated":
@@ -1261,18 +1269,26 @@ export class CodexEventHandler {
         return data;
     }
 
-    private handleTokenUsageUpdated(params: ThreadTokenUsageUpdatedNotification): void {
+    /** Returns true when the update counted as a request of the prompt. */
+    private handleTokenUsageUpdated(params: ThreadTokenUsageUpdatedNotification): boolean {
         this.sessionState.lastTokenUsage = toTokenCount(params.tokenUsage.last);
         this.sessionState.totalTokenUsage = toTokenCount(params.tokenUsage.total);
-        this.sessionState.promptTokenUsage?.observe(this.sessionState.totalTokenUsage, this.sessionState.lastTokenUsage);
+        const counted = this.sessionState.promptTokenUsage?.observe(this.sessionState.totalTokenUsage, this.sessionState.lastTokenUsage) ?? false;
         this.sessionState.modelContextWindow = params.tokenUsage.modelContextWindow;
+        return counted;
     }
 
-    private createUsageUpdate(params: ThreadTokenUsageUpdatedNotification): UpdateSessionEvent | null {
+    private async createUsageUpdate(params: ThreadTokenUsageUpdatedNotification): Promise<UpdateSessionEvent | null> {
         let used: number | undefined;
         let size: number | null;
         if (params.threadId === this.sessionState.sessionId) {
-            this.handleTokenUsageUpdated(params);
+            if (this.handleTokenUsageUpdated(params)) {
+                const model = this.rootModel();
+                const record = this.createUsageRecord(
+                    "request", model, this.sessionState.lastTokenUsage!, this.sessionState.currentModelSupportsFast,
+                );
+                if (record) await this.session.update(record);
+            }
             used = this.sessionState.lastTokenUsage?.totalTokens;
             size = this.sessionState.modelContextWindow;
         } else if (this.subagents.isNativeSubagentThread(params.threadId)) {
@@ -1281,7 +1297,7 @@ export class CodexEventHandler {
             used = params.tokenUsage.last.totalTokens;
             size = params.tokenUsage.modelContextWindow;
         } else {
-            return null;
+            return this.createChildUsageRecord(params);
         }
         if (used == null || size == null || size <= 0) {
             return null;
@@ -1291,6 +1307,48 @@ export class CodexEventHandler {
             sessionUpdate: "usage_update",
             used,
             size,
+        };
+    }
+
+    /** One record for a hidden subagent's request. It leaves the usage of the root session untouched. */
+    private createChildUsageRecord(params: ThreadTokenUsageUpdatedNotification): UpdateSessionEvent | null {
+        const total = toTokenCount(params.tokenUsage.total);
+        const child = this.sessionState.childUsage.get(params.threadId);
+        if (child?.total && sameCount(child.total, total)) return null;
+        this.sessionState.childUsage.set(params.threadId, {...child, total});
+        const model = child?.model ?? this.rootModel();
+        const modelInfo = this.sessionState.availableModels.find(m => m.id === model);
+        return this.createUsageRecord("subagent", model, toTokenCount(params.tokenUsage.last), modelSupportsFast(modelInfo));
+    }
+
+    private rootModel(): string {
+        return this.sessionState.currentModelId.replace(/\[.*?]$/, "");
+    }
+
+    /** The per-request record that the pricing service reads. It is null for a request with no tokens. */
+    private createUsageRecord(
+        scope: "request" | "subagent",
+        model: string,
+        last: TokenCount,
+        supportsFast: boolean,
+    ): UpdateSessionEvent | null {
+        if (last.inputTokens + last.cachedInputTokens + last.cacheWriteInputTokens + last.outputTokens === 0) return null;
+        const serviceTier = resolveFastServiceTier(this.sessionState.fastModeEnabled, supportsFast);
+        return {
+            sessionUpdate: "session_info_update",
+            _meta: {
+                "workbench/usage": {
+                    scope,
+                    provider: this.sessionState.authProvider ?? "openai",
+                    model,
+                    input: last.inputTokens,
+                    cacheRead: last.cachedInputTokens,
+                    cacheWrite: last.cacheWriteInputTokens,
+                    output: last.outputTokens,
+                    reasoning: last.reasoningOutputTokens,
+                    ...(serviceTier === null ? {} : {serviceTier}),
+                },
+            },
         };
     }
 
