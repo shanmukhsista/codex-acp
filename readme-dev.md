@@ -9,11 +9,12 @@ Set `CODEX_PATH` to run a different Codex binary; versions other than the one sp
 - `CODEX_CONFIG` - JSON object merged into the Codex session config. `hooks` move to App Server startup (`-c hooks=...`) for AIR review; Codex rejects malformed hooks at startup and `initialize` reports its error.
 - `MODEL_PROVIDER` - model provider to pass to Codex for new sessions.
 - `DEFAULT_AUTH_REQUEST` - ACP auth request JSON used when Codex requires authentication.
-- `INITIAL_AGENT_MODE` - initial mode id: `read-only`, `workspace-write`, `agent`, or `agent-full-access`.
+- `INITIAL_AGENT_MODE` - initial mode id: `read-only`, `workspace-write`, `agent`, `agent-full-access`, or `permission-profile:<profile-id>`. See [permission profile selection](docs/permission-profiles.md).
 - `NO_BROWSER` - hide browser-based ChatGPT auth when set.
 - `APP_SERVER_LOGS` - directory for adapter logs.
 - `CODEX_ACP_APP_SERVER_CRASH_LIMIT` - how many crashes of the Codex app-server in the crash window stop its automatic restart (default `5`).
 - `CODEX_ACP_APP_SERVER_CRASH_WINDOW_MS` - the crash window in milliseconds (default `300000`, 5 minutes).
+- `CODEX_ACP_PROMPT_SUGGESTIONS` - set to `false` to turn off the predicted follow-up prompt for AIR. It costs one extra model call per turn on the session's model, mostly from cached context.
 
 ### Quick start
 
@@ -140,6 +141,16 @@ The adapter restarts the Codex app-server when it dies (for example, killed for 
 - Codex writes a thread to disk only with its first message, so a session without messages cannot be resumed in a new
   app-server, after a crash or a provider restart. Its next use fails with "had no messages yet and was lost"; the
   client starts a new session. A provider restart still completes for the agent and the other sessions.
+  A `providers/set` with the routing (base URL, API type, headers) that the last `providers/set` applied does not
+  restart the app-server: it waits for a provider update in flight and succeeds. After a failed provider update it
+  restarts again.
+- The app-server starts with the provider of the routing as `-c model_provider=…` and `-c model_providers.<id>=…`
+  overrides, for that process only; the user's `config.toml` is not changed. The provider is the gateway of
+  `providers/set` or of the `gateway` auth method, else `MODEL_PROVIDER`, else `model_provider` of `CODEX_CONFIG`.
+  Header values go in `CODEX_ACP_PROVIDER_HEADER_<n>` environment variables through `env_http_headers`, so that they
+  are not in the process arguments. Codex 0.166 and later refuse input for a thread whose provider is not the one of
+  its app-server, so a `providers/set`, `providers/disable` or `authenticate` that changes the provider restarts the
+  app-server even when no session is open.
 - After `CODEX_ACP_APP_SERVER_CRASH_LIMIT` crashes in the crash window the adapter stops restarting it and says so,
   with the stderr of the last crash.
   A session that the app-server died opening twice in 30 minutes is not opened again for the rest of that time, so
@@ -165,6 +176,8 @@ to v2; it reuses the runtime environment variables above.
 
 Both ACP versions advertise `systemPrompt: {}`: text-only `append` mode. Override and non-text
 content are rejected with `-32602` before a session is created or a fork is made.
+An empty `content` array is also rejected before any lifecycle change; it does not clear
+existing client or AIR instructions.
 Text blocks are joined with a blank line and appended to the existing developer-instruction
 baseline: AIR `customInstructions` when supplied, otherwise configured Codex developer instructions.
 Codex's base instructions and workspace context remain intact. Requests without `systemPrompt`
@@ -212,7 +225,7 @@ schema alone:
   channel. The same `_meta` v1 attaches to `PromptResponse` is copied onto the v2 idle update.
 - Custom session updates are renamed on v2: `subagent_spawned`/`subagent_state_update` become a
   single `_subagent_update` (gated on the AIR `nativeSubagentSessions` capability; this contract is
-  retained until the adapter migrates to the standard subagent model), and
+  retained independently of standard subagent sessions), and
   `async_task_spawned`/`async_task_state_update` become `_async_task_spawned`/`_async_task_state_update`
   (gated on the AIR `asyncTasks` capability). Payload shapes are unchanged.
 - Foreground state is independent of prompt acceptance. `running` can precede the user-message
@@ -242,11 +255,64 @@ schema alone:
 - Other AIR `_meta` keys (goal, message phase, mode kind, permission presentation) go only to AIR
   clients, as on v1. Every v2 permission request still gets its prompt `title` and `description`.
 
+#### Live standard subagent sessions
+
+Non-AIR v1 clients opt in with `clientCapabilities.subagents: {}`. Non-AIR v2 clients use
+standard `subagent_update` associations automatically. AIR keeps its existing opt-in, updates,
+and generation-based identities; clients do not receive both contracts.
+
+A standard child keeps one opaque conversation ID across assignments and parent handler changes.
+Its ancestors are announced before its output, tool updates, or interactions. Permissions and
+elicitation use the child's ID and survive parent replay; actual work endings withdraw obsolete
+requests locally, even if the client returns a late answer. Child tools, terminals, plans, titles,
+and observed configuration stay separate from the parent.
+
+Only cancellation is advertised, and only while an owned, observable child's current turn can be
+identified. Send `session/cancel` with its opaque ACP child ID to interrupt that work and observed
+owned descendant work, not its parent or siblings. Raw provider IDs cannot bypass the restriction.
+Prompting, loading, configuration changes, closing, and other child mutations remain disabled.
+Parent cancellation still interrupts observed live descendants.
+An observed work ending reports `idle`; loss of observability reports `unknown`, not a fabricated
+failure or a permanently closed conversation.
+
+Cancellation withdraws affected permission/elicitation requests, but an interrupt acknowledgement
+does not fabricate a cancelled outcome. Actual provider completion reports the ending; the same
+conversation may receive later work. Idle or unobservable children have no cancel capability.
+Reattachment suspends child controls until the latest successful response is actually written,
+including complete JSON-RPC batches; historical or copied child records never grant control.
+
+Child `config_option_update` notifications contain complete reported snapshots. Observed model and
+reasoning effort use singleton selects, including changes between assignments. Unknown or unset values
+are omitted; no values are inferred from the parent or requested spawn arguments. These reports do not
+enable configuration changes, even to the current value. Replayed configuration is historical, not
+confirmed current. Reattachment drops cached confirmation and refreshes loaded children after the
+response. Optional reads do not block child delivery; newer observations or attachment changes discard
+stale results.
+
+Replay follows both recorded spawn formats and replays available child transcripts once per conversation,
+including nested children, using legacy or paginated history. Announcements and all selected history
+precede the response. Completed snapshots reconcile tool and rendering state before duplicate live
+payloads are suppressed; live bookkeeping still runs. In-progress commands retain classification without
+resetting streamed output. Incomplete text has no safe delta cursor; it and other records without a safe
+partial representation are omitted rather than replayed over newer content. Agent-owned input is not
+rendered as human input. Missing, omitted, or incomplete child history produces a parent advisory;
+an empty transcript alone does not invent a gap.
+
+Replay reports the latest recorded child turn's known success, cancellation, or failure as historical
+`idle` before the response. A missing or still-running turn invents no outcome. Legacy history reuses
+its turn data; paginated history reads the latest turn summary separately, retaining available text
+and reporting a gap if that summary is unavailable. Recorded outcomes do not enter the live foreground
+cache, withdraw current interactions, confirm runtime ownership, or grant controls.
+Rejoining a loaded child still requires current provider parentage; copied fork history can be displayed
+but cannot acquire the original runtime's subscriptions.
+After replay, current child work/configuration snapshots follow the actual response write, including whole
+JSON-RPC batches. Parent setup operations serialize without waiting on each other's batch delivery.
+
 #### Models of a `providers/set` gateway
 
 `providers/set` lists the models of the gateway (`GET {baseUrl}/models`, with the headers Codex sends to it)
 before it responds. The models reported to the client are then only the Codex models whose `model` or `id` the
-gateway lists, matched without case and date suffix. A session whose thread model the gateway does not list uses
+gateway lists, matched without case, vendor prefix (`openai/gpt-5.4`, as OpenRouter lists it) and date suffix. A session whose thread model the gateway does not list uses
 the default of these models; a thread model that the gateway lists but Codex does not know is kept. A gateway that
 lists none of the Codex models leaves no model option at all, and the session keeps the thread's model as current.
 Sessions already open get the models of the new routing when the provider restart resumes them, after

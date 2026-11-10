@@ -49,6 +49,18 @@ export class CommandReporter {
         return startFacts(item);
     }
 
+    /** Replay restores classification without forgetting bytes that already streamed live. */
+    restore(item: CommandItem): void {
+        if (item.status === "inProgress") {
+            if (!this.terminalCommands.has(item.id) && !this.nonTerminalCommands.has(item.id)) this.started(item);
+        } else {
+            this.nonTerminalCommands.delete(item.id);
+            this.terminalCommands.delete(item.id);
+            this.streamedCommands.delete(item.id);
+            this.standardStreamedCommands.delete(item.id);
+        }
+    }
+
     /** A chunk of command output. AIR gets the output of a read, search or list command at the end. */
     outputDelta(itemId: string, delta: string): ToolFacts {
         if (delta.length > 0) this.standardStreamedCommands.add(itemId);
@@ -128,7 +140,10 @@ export class CommandReporter {
             standard: {
                 kind: "execute",
                 status: "pending",
-                title: network ? `${network.protocol} network access to ${network.host}` : permissionTitle(actions),
+                // Zed uses the title as the command label, including when merging an approval into a started call.
+                title: network
+                    ? `${network.protocol} network access to ${network.host}`
+                    : started ? startedCommandTitle(params, actions) : input.command ?? permissionTitle(actions),
                 locations: [...new Set([
                     ...actionPaths(actions),
                     ...permissionProfilePaths(params.additionalPermissions),
