@@ -95,7 +95,7 @@ const reviewReplayTurns: Thread["turns"] = [
             {type: "enteredReviewMode", id: "review-entered", review: "Review the diff"},
             {type: "exitedReviewMode", id: "review-exited", review: "Looks good"},
             {
-                type: "agentMessage",
+                type: "agentMessage", moderation: null,
                 id: "review-summary",
                 text: "Review complete.",
                 phase: null,
@@ -122,7 +122,7 @@ const reviewReplayTurns: Thread["turns"] = [
                 content: [{type: "text", text: "Reply with just OK.", text_elements: []}],
             },
             {
-                type: "agentMessage",
+                type: "agentMessage", moderation: null,
                 id: "ordinary-reply",
                 text: "OK",
                 phase: null,
@@ -145,7 +145,7 @@ const reviewReplayTurns: Thread["turns"] = [
             {type: "enteredReviewMode", id: "review2-entered", review: "Second review"},
             {type: "exitedReviewMode", id: "review2-exited", review: "All good"},
             {
-                type: "agentMessage",
+                type: "agentMessage", moderation: null,
                 id: "review2-summary",
                 text: "Second review complete.",
                 phase: null,
@@ -225,7 +225,7 @@ async function connectV2Client(options?: {
     const codexAcpClient = new CodexAcpClient(new CodexAppServerClient(mocks.mockCodexConnection as any));
     vi.spyOn(codexAcpClient, "readAuthRequirement").mockResolvedValue({required: false, account: null});
     vi.spyOn(codexAcpClient, "getAgentConfiguredModelProvider").mockResolvedValue("openai");
-    vi.spyOn(codexAcpClient, "getAccount").mockResolvedValue({account: null, requiresOpenaiAuth: false});
+    vi.spyOn(codexAcpClient, "getAccount").mockResolvedValue({account: null, userId: null, requiresOpenaiAuth: false});
     vi.spyOn(codexAcpClient, "awaitMcpServerStartup").mockResolvedValue({ready: [], failed: [], cancelled: []});
     const router = createAcpAgentRouter((connection) => new CodexAcpServer(connection, codexAcpClient));
     const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
@@ -496,7 +496,7 @@ describe('resume replay of Codex file citations', () => {
         completedAt: null,
         durationMs: null,
         items: [{
-            type: "agentMessage",
+            type: "agentMessage", moderation: null,
             id: "cited-reply",
             text: 'The limit is 12.\n\n:codex-file-citation{path="policy.txt" purpose="source"}',
             phase: null,

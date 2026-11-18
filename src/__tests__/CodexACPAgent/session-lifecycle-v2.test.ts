@@ -154,7 +154,7 @@ async function connectV2Client(options?: {
     const codexAcpClient = new CodexAcpClient(new CodexAppServerClient(mocks.mockCodexConnection as any));
     vi.spyOn(codexAcpClient, "readAuthRequirement").mockResolvedValue({required: false, account: null});
     vi.spyOn(codexAcpClient, "getAgentConfiguredModelProvider").mockResolvedValue("openai");
-    vi.spyOn(codexAcpClient, "getAccount").mockResolvedValue({account: null, requiresOpenaiAuth: false});
+    vi.spyOn(codexAcpClient, "getAccount").mockResolvedValue({account: null, userId: null, requiresOpenaiAuth: false});
     vi.spyOn(codexAcpClient, "awaitMcpServerStartup").mockResolvedValue({ready: [], failed: [], cancelled: []});
     let agent: CodexAcpServer | null = null;
     const router = createAcpAgentRouter((connection) => {
@@ -596,7 +596,7 @@ describe('Session lifecycle over ACP v2', () => {
                 content: [{type: "text", text: "A legacy message with no clientId", text_elements: []}],
             },
             {
-                type: "agentMessage",
+                type: "agentMessage", moderation: null,
                 id: "item-agent-1",
                 text: "Hello!",
                 phase: null,
