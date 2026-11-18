@@ -795,6 +795,7 @@ export class CodexEventHandler {
             case "thread/deleted":
             case "thread/reverted":
             case "thread/queue/changed":
+            case "thread/section/changed":
             case "project/changed":
             case "thread/project/updated":
             case "thread/environment/connected":

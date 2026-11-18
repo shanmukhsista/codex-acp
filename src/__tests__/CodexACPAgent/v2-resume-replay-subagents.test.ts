@@ -100,7 +100,7 @@ const childTurns: Thread["turns"] = [
                 durationMs: null,
             },
             {
-                type: "agentMessage",
+                type: "agentMessage", moderation: null,
                 id: "child-reply",
                 text: "Investigating the flaky test.",
                 phase: null,
@@ -162,7 +162,7 @@ async function connectV2Client(
     const codexAcpClient = new CodexAcpClient(new CodexAppServerClient(mocks.mockCodexConnection as any));
     vi.spyOn(codexAcpClient, "readAuthRequirement").mockResolvedValue({required: false, account: null});
     vi.spyOn(codexAcpClient, "getAgentConfiguredModelProvider").mockResolvedValue("openai");
-    vi.spyOn(codexAcpClient, "getAccount").mockResolvedValue({account: null, requiresOpenaiAuth: false});
+    vi.spyOn(codexAcpClient, "getAccount").mockResolvedValue({account: null, userId: null, requiresOpenaiAuth: false});
     vi.spyOn(codexAcpClient, "awaitMcpServerStartup").mockResolvedValue({ready: [], failed: [], cancelled: []});
     const router = createAcpAgentRouter((connection) => new CodexAcpServer(connection, codexAcpClient));
     const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
@@ -306,6 +306,7 @@ describe('ACP v2 resume replay: native subagent history (nativeSubagentSessions 
         });
         const reply = (id: string, text: string) => ({
             type: "agentMessage" as const,
+            moderation: null,
             id,
             text,
             phase: null,

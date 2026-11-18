@@ -75,11 +75,11 @@ describe("New session logout handling", () => {
         const getAccountSpy = vi.spyOn(codexAcpClient, "getAccount")
             .mockResolvedValueOnce({
                 account: { type: "apiKey" },
-                requiresOpenaiAuth: false,
+                userId: null, requiresOpenaiAuth: false,
             })
             .mockResolvedValueOnce({
                 account: null,
-                requiresOpenaiAuth: true,
+                userId: null, requiresOpenaiAuth: true,
             });
 
         const errorMessage = `Internal error: "failed to reload config: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again."`;

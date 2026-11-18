@@ -224,7 +224,7 @@ describe("CodexACPAgent - loadSession", () => {
                 durationMs: null,
             },
             {
-                type: "agentMessage",
+                type: "agentMessage", moderation: null,
                 id: "child-history-message-1",
                 text: "Persisted first-generation output",
                 phase: null,
@@ -244,7 +244,7 @@ describe("CodexACPAgent - loadSession", () => {
             completedAt: firstChildTurn.completedAt,
             durationMs: firstChildTurn.durationMs,
             items: [{
-                type: "agentMessage",
+                type: "agentMessage", moderation: null,
                 id: "child-history-message-2",
                 text: "Persisted second-generation output",
                 phase: null,
@@ -370,6 +370,7 @@ describe("CodexACPAgent - loadSession", () => {
         });
         const message = (id: string) => ({
             type: "agentMessage" as const,
+            moderation: null,
             id,
             text: id,
             phase: null,
@@ -677,7 +678,7 @@ describe("CodexACPAgent - loadSession", () => {
                             ],
                         },
                         {
-                            type: "agentMessage",
+                            type: "agentMessage", moderation: null,
                             id: "item-agent-1",
                             text: "Hello!",
                             phase: null,
